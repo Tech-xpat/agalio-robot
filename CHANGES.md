@@ -1,14 +1,15 @@
 # Changelog
 
+## v3.1.0 — Filters + Custom Entry
+
+- Scanner only considers tokens **≥ 10 days old** with **rising** price action.
+- Filters use liquidity, volume, 1h buy activity, buy/sell pressure (DexScreener free API does not expose reliable holder/watcher counts).
+- **Custom entry**: `/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10`
+- One-by-one: `/setsize` `/settp` `/setsl` `/sethold` `/setscan` `/setmaxtrades`
+- Removed dead commands.
+- Medium remains default.
+
 ## v3.0.0 — Direct Scanner
 
 - Removed whale-wallet tracking as entry source.
-- New scanner: DexScreener boosts/profiles/search → score chart → buy.
-- Modes rewritten:
-  - Easy: $2, TP 30%, SL 20%, hold 2m, every 5m, max 7/day
-  - Medium: $5, TP 60%, SL 30%, hold 5m, every 10m, max 15/day
-  - Hard: $7, TP 100%, SL 45%, hold 8m, every 30m, max 20/day
-- Fixed USD size converted live to SOL.
-- Daily trade counter enforced.
-- Telegram: /report + Refresh button, real open/closed status, Sell All.
-- Bot active on start. Real fills still read from chain. PumpPortal swaps unchanged.
+- Modes Easy/Medium/Hard with fixed USD size and real chain fills.

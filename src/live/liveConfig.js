@@ -1,9 +1,6 @@
-const staticConfig = require('../config');
-
 /**
- * Risk presets — rewritten for direct scanner (no whales).
- * sizeUsd is the target notional per trade.
- * scanIntervalMin controls how often the scanner looks for a new coin.
+ * Risk presets + live custom overrides.
+ * Custom: /setsize /settp /setsl /sethold /setscan /setmaxtrades
  */
 const PRESETS = {
   easy: {
@@ -43,19 +40,15 @@ const PRESETS = {
 
 let cached = {
   paused: false,
-  riskProfile: 'easy',
-  sizeUsd: PRESETS.easy.sizeUsd,
-  takeProfitPct: PRESETS.easy.takeProfitPct,
-  stopLossPct: PRESETS.easy.stopLossPct,
-  maxHoldMin: PRESETS.easy.maxHoldMin,
-  scanIntervalMin: PRESETS.easy.scanIntervalMin,
-  maxTradesDay: PRESETS.easy.maxTradesDay,
-  capitalPct: PRESETS.easy.capitalPct,
-  maxPositionSol: PRESETS.easy.maxPositionSol,
-  // legacy fields kept so old code does not crash
-  dipEntryPct: 0,
-  minWhaleAgreement: 0,
-  whaleLookbackMin: 0,
+  riskProfile: 'medium',
+  sizeUsd: PRESETS.medium.sizeUsd,
+  takeProfitPct: PRESETS.medium.takeProfitPct,
+  stopLossPct: PRESETS.medium.stopLossPct,
+  maxHoldMin: PRESETS.medium.maxHoldMin,
+  scanIntervalMin: PRESETS.medium.scanIntervalMin,
+  maxTradesDay: PRESETS.medium.maxTradesDay,
+  capitalPct: PRESETS.medium.capitalPct,
+  maxPositionSol: PRESETS.medium.maxPositionSol,
 };
 
 function getConfig() {
@@ -80,6 +73,27 @@ function applyPreset(name) {
   return getConfig();
 }
 
+function applyCustom(params = {}) {
+  const allowed = [
+    'sizeUsd',
+    'takeProfitPct',
+    'stopLossPct',
+    'maxHoldMin',
+    'scanIntervalMin',
+    'maxTradesDay',
+    'maxPositionSol',
+    'capitalPct',
+  ];
+  const patch = { riskProfile: 'custom' };
+  for (const k of allowed) {
+    if (params[k] != null && Number.isFinite(Number(params[k]))) {
+      patch[k] = Number(params[k]);
+    }
+  }
+  cached = { ...cached, ...patch };
+  return getConfig();
+}
+
 function listPresets() {
   return Object.entries(PRESETS).map(([key, p]) => ({
     key,
@@ -89,8 +103,18 @@ function listPresets() {
 }
 
 function start() {
-  console.log('[live-config] direct-scanner presets loaded');
-  applyPreset(cached.riskProfile || 'easy');
+  console.log('[live-config] presets + custom entry ready');
+  if (cached.riskProfile === 'medium' || !PRESETS[cached.riskProfile]) {
+    applyPreset('medium');
+  }
 }
 
-module.exports = { getConfig, applyLocal, applyPreset, listPresets, PRESETS, start };
+module.exports = {
+  getConfig,
+  applyLocal,
+  applyPreset,
+  applyCustom,
+  listPresets,
+  PRESETS,
+  start,
+};
