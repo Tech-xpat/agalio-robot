@@ -1,14 +1,6 @@
 /**
  * Position lifecycle. Principle: never guess what happened on-chain, read it.
- *
- *  BUY   -> send -> wait until the chain says confirmed/failed -> read the exact tokens received
- *           and the exact SOL that left the wallet from the transaction itself.
- *  HOLD  -> TP/SL use the mark value (tokens we REALLY hold x live SOL price) vs what we REALLY paid.
- *  SELL  -> sell 100% -> read the wallet's token balance until it is 0 -> read the exact SOL received.
- *           A failed sell never deletes the position: it is kept as "stuck" and retried.
- *  Everything is saved, so a restart resumes exactly where it stopped.
- *
- * Entry is now driven by the direct scanner (fixed USD size, mode TP/SL/hold).
+ * Entry features stored for self-learning; closed trades written to Supabase trade_log.
  */
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -19,13 +11,14 @@ const swap = require('./swap');
 const market = require('../analysis/dexscreener');
 const store = require('../storage/positionsStore');
 const scanner = require('../scanner/scanner');
+const memory = require('../learning/memory');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const toSol = (lamports) => Number(lamports) / 1e9;
 const short = (mint) => `${mint.slice(0, 6)}…${mint.slice(-4)}`;
 const scan = (sig) => (sig ? `https://solscan.io/tx/${sig}` : '');
 
-const open = new Map(); // mint -> position
+const open = new Map();
 let entering = false;
 let notifier = () => {};
 let monitorTimer = null;
@@ -37,16 +30,11 @@ function setNotifier(fn) {
   notifier = typeof fn === 'function' ? fn : () => {};
 }
 
-// ---------- persistence ----------
-
 const warnStore = (e) => notifier(`⚠️ Could not save state: ${e.message}`);
-
 const persistPositions = () =>
   store.save('state', 'positions', () => [...open.values()].map((p) => ({ ...p })), warnStore);
 const persistDaily = () => store.save('state', 'daily', () => ({ ...daily }), warnStore);
 const persistHistory = () => store.save('state', 'history', () => history.slice(), warnStore);
-
-// ---------- balance, daily loss limit, trade count ----------
 
 async function currentBalanceSol() {
   return config.DRY_RUN ? daily.paperBalanceSol : chain.getSolBalance();
@@ -69,7 +57,6 @@ async function isHalted() {
   return daily.realizedSol <= -limit;
 }
 
-/** Fixed USD size converted to SOL. Falls back to capital % if SOL price unavailable. */
 async function sizeSol() {
   const cfg = getConfig();
   const bal = await currentBalanceSol();
@@ -83,13 +70,10 @@ async function sizeSol() {
   return Math.floor(sol * 1e6) / 1e6;
 }
 
-// ---------- buying ----------
-
 async function liveBuy(mint, sol) {
   const wallet = chain.loadWallet();
   const owner = chain.address();
   const solBefore = await chain.getSolLamports();
-
   let sig;
   try {
     sig = await swap.buy(wallet, mint, sol);
@@ -99,7 +83,6 @@ async function liveBuy(mint, sol) {
     if (!verdict.ok) throw new Error(`buy did not land: ${verdict.reason} (${e.signature})`);
     sig = e.signature;
   }
-
   const fill = await fills.readFill(sig, owner, mint);
   if (fill && !fill.failed && fill.tokenDeltaRaw > 0n && fill.solDeltaLamports != null && fill.solDeltaLamports < 0n) {
     return {
@@ -110,7 +93,6 @@ async function liveBuy(mint, sol) {
       source: 'tx',
     };
   }
-
   let bal = { raw: 0n, decimals: null };
   for (let i = 0; i < 6 && bal.raw <= 0n; i++) {
     try {
@@ -150,17 +132,14 @@ async function tryEnter(mint, reason) {
   if (cfg.paused) return { ok: false, why: 'paused' };
   if (open.has(mint) || entering) return { ok: false, why: 'busy' };
   if (open.size >= config.MAX_CONCURRENT) return { ok: false, why: 'max concurrent' };
-
   await rollDay();
   const maxTrades = Number(cfg.maxTradesDay) || 7;
   if (daily.tradesToday >= maxTrades) {
     return { ok: false, why: `max trades/day reached (${daily.tradesToday}/${maxTrades})` };
   }
-
   entering = true;
   try {
     if (await isHalted()) return { ok: false, why: 'daily loss limit reached' };
-
     const mkt = await market.getTokenMarket(mint);
     if (!mkt) return { ok: false, why: 'no SOL-quoted market found' };
     if (mkt.liquidityUsd < config.MIN_LIQUIDITY_USD) {
@@ -170,15 +149,13 @@ async function tryEnter(mint, reason) {
       const mi = await chain.getMintInfo(mint);
       if (mi.mintAuthority || mi.freezeAuthority) return { ok: false, why: 'mint/freeze authority still active' };
     }
-
     const sol = await sizeSol();
     if (sol < config.MIN_POSITION_SOL) return { ok: false, why: `size ${sol} SOL below minimum` };
-
     logger.info(`ENTER ${short(mint)} ${sol} SOL ($${cfg.sizeUsd}) (${reason}) ${config.DRY_RUN ? '[PAPER]' : '[LIVE]'}`);
     const fill = config.DRY_RUN ? await paperBuy(mint, sol, mkt) : await liveBuy(mint, sol);
-
     const costSol = toSol(fill.costLamports);
     const tokensUi = Number(fill.tokenRaw) / 10 ** fill.decimals;
+    const scoreMatch = String(reason || '').match(/scanner:(\d+(?:\.\d+)?)/);
     const pos = {
       mint,
       openedAt: Date.now(),
@@ -194,6 +171,16 @@ async function tryEnter(mint, reason) {
       buySig: fill.signature,
       reason,
       mode: cfg.riskProfile,
+      ageDays: mkt.ageDays ?? null,
+      liquidityUsd: mkt.liquidityUsd ?? null,
+      volume1h: mkt.volume1h ?? null,
+      priceChange1h: mkt.priceChange1h ?? null,
+      priceChange6h: mkt.priceChange6h ?? null,
+      buys1h: mkt.buys1h ?? null,
+      score: scoreMatch ? Number(scoreMatch[1]) : null,
+      takeProfitPct: cfg.takeProfitPct,
+      stopLossPct: cfg.stopLossPct,
+      maxHoldMin: cfg.maxHoldMin,
       lastPnl: null,
       lastPrice: null,
       priceMisses: 0,
@@ -213,8 +200,6 @@ async function tryEnter(mint, reason) {
   }
 }
 
-// ---------- monitoring ----------
-
 function markPnl(pos, priceNative) {
   const tokensUi = Number(pos.tokenRaw) / 10 ** pos.decimals;
   const value = tokensUi * priceNative * (1 - config.EXIT_COST_PCT / 100);
@@ -227,7 +212,6 @@ async function checkPosition(pos) {
   const tp = Number(cfg.takeProfitPct) || 30;
   const sl = -Math.abs(Number(cfg.stopLossPct) || 20);
   const maxHoldMs = (Number(cfg.maxHoldMin) || 2) * 60 * 1000;
-
   let pnl = null;
   try {
     const mkt = await market.getTokenMarket(pos.mint);
@@ -245,12 +229,10 @@ async function checkPosition(pos) {
   if (pos.priceMisses === 6) {
     notifier(`⚠️ No price for ${short(pos.mint)} for a while. Only the max-hold timer can exit it now. /sellall sells it manually.`);
   }
-
   let reason = null;
   if (pnl != null && pnl >= tp) reason = 'take_profit';
   else if (pnl != null && pnl <= sl) reason = 'stop_loss';
   else if (Date.now() - pos.openedAt >= maxHoldMs) reason = 'max_hold';
-
   if (reason) exit(pos, reason).catch((e) => logger.error('exit crashed:', e.message));
 }
 
@@ -271,8 +253,6 @@ async function monitorTick() {
   }
 }
 
-// ---------- selling ----------
-
 async function paperSell(pos) {
   let price = pos.lastPrice;
   try {
@@ -290,11 +270,9 @@ async function liveSell(pos) {
   const owner = chain.address();
   const flat = async () => (await chain.getTokenBalance(pos.mint)).raw <= 0n;
   const solBefore = await chain.getSolLamports().catch(() => null);
-
   try {
     if (await flat()) return { proceedsLamports: null, sig: null, source: 'already-flat' };
   } catch (_) {}
-
   let lastErr = null;
   let landed = 0;
   for (let attempt = 1; attempt <= config.SELL_RETRIES; attempt++) {
@@ -317,7 +295,6 @@ async function liveSell(pos) {
       }
     }
     landed += 1;
-
     let remaining = null;
     for (let i = 0; i < 3; i++) {
       try {
@@ -355,12 +332,12 @@ async function finalizeClose(pos, reason, result) {
     if (pos.dryRun) daily.paperBalanceSol += proceedsSol;
   }
   open.delete(pos.mint);
-
+  const closedAt = Date.now();
   const pct = realizedSol != null ? (realizedSol / costSol) * 100 : null;
   history.unshift({
     mint: pos.mint,
     openedAt: pos.openedAt,
-    closedAt: Date.now(),
+    closedAt,
     reason,
     costSol,
     proceedsSol,
@@ -372,12 +349,42 @@ async function finalizeClose(pos, reason, result) {
     sellSource: result.source,
     paper: !!pos.dryRun,
     mode: pos.mode,
+    ageDays: pos.ageDays,
+    liquidityUsd: pos.liquidityUsd,
+    volume1h: pos.volume1h,
+    priceChange1h: pos.priceChange1h,
+    score: pos.score,
   });
   history = history.slice(0, 50);
   persistPositions();
   persistDaily();
   persistHistory();
-
+  memory
+    .logTrade({
+      profile: pos.mode,
+      mint: pos.mint,
+      entryReason: pos.reason,
+      exitReason: reason,
+      costSol,
+      proceedsSol,
+      realizedSol,
+      pct,
+      holdSec: pos.openedAt ? Math.round((closedAt - pos.openedAt) / 1000) : null,
+      ageDays: pos.ageDays,
+      liquidityUsd: pos.liquidityUsd,
+      volume1h: pos.volume1h,
+      priceChange1h: pos.priceChange1h,
+      priceChange6h: pos.priceChange6h,
+      buys1h: pos.buys1h,
+      score: pos.score,
+      sizeUsd: pos.sizeUsd,
+      takeProfitPct: pos.takeProfitPct,
+      stopLossPct: pos.stopLossPct,
+      maxHoldMin: pos.maxHoldMin,
+      buySig: pos.buySig,
+      sellSig: result.sig,
+    })
+    .catch(() => {});
   const head = realizedSol == null ? '⚪' : realizedSol >= 0 ? '🟢' : '🔴';
   const money =
     realizedSol == null
@@ -424,8 +431,6 @@ function exitAll(reason = 'manual') {
   return n;
 }
 
-// ---------- start / restore ----------
-
 async function init() {
   let saved = [];
   try {
@@ -444,9 +449,7 @@ async function init() {
     const h = await store.get('state', 'history');
     if (Array.isArray(h)) history = h;
   } catch (_) {}
-
   if (config.DRY_RUN && !(daily.paperBalanceSol > 0)) daily.paperBalanceSol = config.DRY_RUN_BALANCE_SOL;
-
   let restored = 0;
   let dropped = 0;
   for (const p of saved) {
@@ -468,7 +471,6 @@ async function init() {
     await persistPositions();
     notifier(`♻️ Restored ${restored} open position(s) after restart${dropped ? `, dropped ${dropped} already sold` : ''}`);
   }
-
   if (!monitorTimer) {
     monitorTimer = setInterval(() => monitorTick().catch((e) => logger.error('monitor:', e.message)), config.PRICE_POLL_MS);
     if (monitorTimer.unref) monitorTimer.unref();
