@@ -1,6 +1,12 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN } = require('../config');
-const { getConfig, applyLocal, applyPreset, listPresets } = require('../live/liveConfig');
+const {
+  getConfig,
+  applyLocal,
+  applyPreset,
+  applyCustom,
+  listPresets,
+} = require('../live/liveConfig');
 const positions = require('../trading/positions');
 const scanner = require('../scanner/scanner');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
@@ -20,14 +26,12 @@ function liveStatusLine() {
   const sc = scanner.status();
 
   if (c.paused) {
-    return {
-      key: 'paused',
-      text: `⏸  PAUSED\nBot is stopped. Press Start to resume.`,
-    };
+    return { key: 'paused', text: '⏸  PAUSED\nBot is stopped. Press Start to resume.' };
   }
   if (open.length > 0) {
     const p = open[0];
-    const pnl = p.lastPnl != null ? ` · PnL ${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}%` : '';
+    const pnl =
+      p.lastPnl != null ? ` · PnL ${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}%` : '';
     const held = Math.round((Date.now() - p.openedAt) / 1000);
     return {
       key: `trade:${open.length}:${Math.floor(held / 10)}`,
@@ -36,7 +40,7 @@ function liveStatusLine() {
   }
   return {
     key: `scan:${c.riskProfile}:${sc.nextInSec}`,
-    text: `🔍  SCANNING\nMode ${c.riskProfile.toUpperCase()} · next scan ~${sc.nextInSec}s\n$${c.sizeUsd} · every ${c.scanIntervalMin}m · max ${c.maxTradesDay}/day`,
+    text: `🔍  SCANNING\nMode ${String(c.riskProfile).toUpperCase()} · next ~${sc.nextInSec}s\n$${c.sizeUsd} · age≥${sc.minAgeDays || 10}d rising · max ${c.maxTradesDay}/day`,
   };
 }
 
@@ -50,7 +54,9 @@ function statusText() {
       ? '🟢 Easy'
       : c.riskProfile === 'hard'
         ? '🔴 Hard'
-        : '🟡 Medium';
+        : c.riskProfile === 'custom'
+          ? '⚙️ Custom'
+          : '🟡 Medium';
   return [
     DRY_RUN ? '🧪 DRY RUN' : '🔴 LIVE',
     c.paused ? '⏸ PAUSED' : '🟢 RUNNING',
@@ -58,6 +64,7 @@ function statusText() {
     '',
     `Size: $${c.sizeUsd} · TP +${c.takeProfitPct}% · SL −${c.stopLossPct}%`,
     `Max hold: ${c.maxHoldMin}m · Scan every ${c.scanIntervalMin}m`,
+    `Filter: age ≥ ${sc.minAgeDays || 10}d + rising`,
     `Trades today: ${daily.tradesToday || 0}/${c.maxTradesDay}`,
     `Open: ${open.length} · Next scan ~${sc.nextInSec}s`,
   ].join('\n');
@@ -67,13 +74,17 @@ function pnlText() {
   const open = positions.listOpen();
   const { daily, history, balanceKind } = positions.stats();
   const lines = [];
-  lines.push(DRY_RUN ? '🧪 PAPER MODE (numbers are price-based)' : '🔴 LIVE (numbers read from the chain)');
+  lines.push(DRY_RUN ? '🧪 PAPER MODE' : '🔴 LIVE (chain-read fills)');
   if (open.length) {
     lines.push('', 'Open:');
     for (const p of open) {
-      const pnl = p.lastPnl == null ? 'no price yet' : `${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}% (est.)`;
+      const pnl =
+        p.lastPnl == null
+          ? 'no price yet'
+          : `${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}% (est.)`;
       const held = Math.round((Date.now() - p.openedAt) / 1000);
-      const tag = p.status === 'stuck' ? ' ⚠️ SELL STUCK' : p.status === 'selling' ? ' selling…' : '';
+      const tag =
+        p.status === 'stuck' ? ' ⚠️ SELL STUCK' : p.status === 'selling' ? ' selling…' : '';
       lines.push(
         `${p.mint.slice(0, 6)}…${p.mint.slice(-4)} · ${p.sizeSol.toFixed(4)} SOL · ${pnl} · ${held}s${tag}`
       );
@@ -82,7 +93,10 @@ function pnlText() {
   } else {
     lines.push('', 'No open positions');
   }
-  lines.push('', `Today realized: ${daily.realizedSol >= 0 ? '+' : ''}${(daily.realizedSol || 0).toFixed(4)} SOL`);
+  lines.push(
+    '',
+    `Today realized: ${daily.realizedSol >= 0 ? '+' : ''}${(daily.realizedSol || 0).toFixed(4)} SOL`
+  );
   lines.push(`Trades today: ${daily.tradesToday || 0}`);
   if (balanceKind === 'paper' && daily.paperBalanceSol != null) {
     lines.push(`Paper balance: ${daily.paperBalanceSol.toFixed(4)} SOL`);
@@ -91,7 +105,10 @@ function pnlText() {
   if (last.length) {
     lines.push('', 'Last trades:');
     for (const h of last) {
-      const r = h.realizedSol == null ? '?' : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL (${(h.pct || 0).toFixed(1)}%)`;
+      const r =
+        h.realizedSol == null
+          ? '?'
+          : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL (${(h.pct || 0).toFixed(1)}%)`;
       lines.push(`${h.mint.slice(0, 6)}… ${h.reason} ${r}`);
     }
   }
@@ -106,9 +123,10 @@ function reportText() {
   const lines = [
     '📊 LIVE REPORT',
     DRY_RUN ? 'Mode: PAPER' : 'Mode: LIVE',
-    `Profile: ${c.riskProfile.toUpperCase()}`,
+    `Profile: ${String(c.riskProfile).toUpperCase()}`,
     `Size $${c.sizeUsd} · TP +${c.takeProfitPct}% · SL −${c.stopLossPct}% · hold ${c.maxHoldMin}m`,
-    `Scan interval ${c.scanIntervalMin}m · next ~${sc.nextInSec}s`,
+    `Scan every ${c.scanIntervalMin}m · next ~${sc.nextInSec}s`,
+    `Filter: survived ≥${sc.minAgeDays || 10} days + rising`,
     `Trades today ${daily.tradesToday || 0}/${c.maxTradesDay}`,
     `Realized today: ${daily.realizedSol >= 0 ? '+' : ''}${(daily.realizedSol || 0).toFixed(4)} SOL`,
     '',
@@ -118,7 +136,7 @@ function reportText() {
     for (const p of open) {
       const pnl = p.lastPnl == null ? '…' : `${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}%`;
       const held = Math.round((Date.now() - p.openedAt) / 1000);
-      lines.push(`• ${p.mint.slice(0, 8)}… ${pnl} · held ${held}s · status ${p.status}`);
+      lines.push(`• ${p.mint.slice(0, 8)}… ${pnl} · held ${held}s · ${p.status}`);
       lines.push(`  cost ${p.sizeSol.toFixed(4)} SOL · ${p.fillSource}`);
       if (p.buySig) lines.push(`  tx ${p.buySig.slice(0, 16)}…`);
     }
@@ -128,12 +146,29 @@ function reportText() {
   if (history.length) {
     lines.push('', 'RECENT CLOSED:');
     for (const h of history.slice(0, 5)) {
-      const r = h.realizedSol == null ? '?' : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL`;
+      const r =
+        h.realizedSol == null
+          ? '?'
+          : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL`;
       lines.push(`• ${h.mint.slice(0, 6)}… ${h.reason} ${r}`);
     }
   }
   lines.push('', `Updated: ${new Date().toISOString().slice(11, 19)} UTC`);
   return lines.join('\n');
+}
+
+function helpText() {
+  return [
+    'Commands:',
+    '/menu — status + buttons',
+    '/report — live report (refresh button)',
+    '/pnl — positions + today PnL',
+    '/risk easy|medium|hard',
+    '/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10',
+    '/setsize 5 · /settp 40 · /setsl 25 · /sethold 8',
+    '/setscan 15 · /setmaxtrades 12',
+    '/pause · /resume · /sellall · /balance',
+  ].join('\n');
 }
 
 function mainKeyboard() {
@@ -193,6 +228,31 @@ async function refreshLiveStatus(force = false) {
   }
 }
 
+function parseCustomArgs(text) {
+  const params = {};
+  const map = {
+    size: 'sizeUsd',
+    sizeusd: 'sizeUsd',
+    tp: 'takeProfitPct',
+    takeprofit: 'takeProfitPct',
+    sl: 'stopLossPct',
+    stoploss: 'stopLossPct',
+    hold: 'maxHoldMin',
+    maxhold: 'maxHoldMin',
+    scan: 'scanIntervalMin',
+    interval: 'scanIntervalMin',
+    max: 'maxTradesDay',
+    maxtrades: 'maxTradesDay',
+  };
+  const re = /(\w+)=([\d.]+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const key = map[m[1].toLowerCase()];
+    if (key) params[key] = Number(m[2]);
+  }
+  return params;
+}
+
 function start() {
   if (!TELEGRAM_BOT_TOKEN) {
     console.log('[telegram] disabled (no token)');
@@ -209,6 +269,11 @@ function start() {
     bot.sendMessage(msg.chat.id, statusText(), { reply_markup: mainKeyboard() });
   });
 
+  bot.onText(/\/help/i, (msg) => {
+    if (!allowed(msg.chat.id)) return;
+    bot.sendMessage(msg.chat.id, helpText());
+  });
+
   bot.onText(/\/report/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     bot.sendMessage(msg.chat.id, reportText(), { reply_markup: reportKeyboard() });
@@ -219,24 +284,76 @@ function start() {
     let name = (m[1] || '').toLowerCase();
     if (name === 'high') name = 'hard';
     if (!name) {
-      const lines = listPresets().map((p) => `• *${p.name}* (\`/risk ${p.key}\`)\n  ${p.summary}`);
+      const lines = listPresets().map(
+        (p) => `• *${p.name}* (\`/risk ${p.key}\`)\n  ${p.summary}`
+      );
       bot.sendMessage(
         msg.chat.id,
-        `Current risk: *${getConfig().riskProfile}*\n\nChoose a preset:\n\n${lines.join('\n\n')}`,
+        `Current: *${getConfig().riskProfile}*\n\n${lines.join('\n\n')}\n\nOr set custom: /custom size=5 tp=40 sl=25 hold=8`,
         { parse_mode: 'Markdown', reply_markup: mainKeyboard() }
       );
       return;
     }
     const cfg = applyPreset(name);
     if (!cfg) {
-      bot.sendMessage(msg.chat.id, 'Unknown preset. Use: /risk easy | medium | hard');
+      bot.sendMessage(msg.chat.id, 'Use: /risk easy | medium | hard');
       return;
     }
-    bot.sendMessage(msg.chat.id, `✅ Risk set to *${cfg.riskProfile}*\n\n${statusText()}`, {
+    bot.sendMessage(msg.chat.id, `✅ Risk → *${cfg.riskProfile}*\n\n${statusText()}`, {
       parse_mode: 'Markdown',
       reply_markup: mainKeyboard(),
     });
     refreshLiveStatus(true);
+  });
+
+  bot.onText(/\/custom\b(.*)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    const params = parseCustomArgs(m[1] || '');
+    if (!Object.keys(params).length) {
+      bot.sendMessage(
+        msg.chat.id,
+        'Usage:\n/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10\n\nOr one-by-one:\n/setsize 5\n/settp 40\n/setsl 25\n/sethold 8\n/setscan 15\n/setmaxtrades 10'
+      );
+      return;
+    }
+    applyCustom(params);
+    bot.sendMessage(msg.chat.id, `✅ Custom entry set\n\n${statusText()}`, {
+      reply_markup: mainKeyboard(),
+    });
+    refreshLiveStatus(true);
+  });
+
+  bot.onText(/\/setsize\s+([\d.]+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ sizeUsd: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `Size → $${m[1]} (custom)\n${statusText()}`);
+    refreshLiveStatus(true);
+  });
+  bot.onText(/\/settp\s+([\d.]+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ takeProfitPct: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `TP → +${m[1]}% (custom)`);
+  });
+  bot.onText(/\/setsl\s+([\d.]+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ stopLossPct: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `SL → −${m[1]}% (custom)`);
+  });
+  bot.onText(/\/sethold\s+([\d.]+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ maxHoldMin: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `Max hold → ${m[1]}m (custom)`);
+  });
+  bot.onText(/\/setscan\s+([\d.]+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ scanIntervalMin: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `Scan interval → ${m[1]}m (custom)`);
+    refreshLiveStatus(true);
+  });
+  bot.onText(/\/setmaxtrades\s+(\d+)/i, (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    applyCustom({ maxTradesDay: Number(m[1]) });
+    bot.sendMessage(msg.chat.id, `Max trades/day → ${m[1]} (custom)`);
   });
 
   bot.onText(/\/(pause|stoptrading)/i, (msg) => {
@@ -284,7 +401,9 @@ function start() {
       if (data === 'toggle_pause') {
         const c = getConfig();
         applyLocal({ paused: !c.paused });
-        await bot.answerCallbackQuery(q.id, { text: getConfig().paused ? 'Paused' : 'Running' });
+        await bot.answerCallbackQuery(q.id, {
+          text: getConfig().paused ? 'Paused' : 'Running',
+        });
         await bot.editMessageText(statusText(), {
           chat_id: q.message.chat.id,
           message_id: q.message.message_id,
@@ -292,9 +411,8 @@ function start() {
         });
         refreshLiveStatus(true);
       } else if (data === 'risk_easy' || data === 'risk_medium' || data === 'risk_hard') {
-        const name = data.replace('risk_', '');
-        applyPreset(name);
-        await bot.answerCallbackQuery(q.id, { text: `Set ${name}` });
+        applyPreset(data.replace('risk_', ''));
+        await bot.answerCallbackQuery(q.id, { text: `Set ${data.replace('risk_', '')}` });
         await bot.editMessageText(statusText(), {
           chat_id: q.message.chat.id,
           message_id: q.message.message_id,
@@ -311,7 +429,9 @@ function start() {
           });
         } catch (e) {
           if (!/message is not modified/i.test(e.message)) {
-            await bot.sendMessage(q.message.chat.id, reportText(), { reply_markup: reportKeyboard() });
+            await bot.sendMessage(q.message.chat.id, reportText(), {
+              reply_markup: reportKeyboard(),
+            });
           }
         }
       } else if (data === 'menu') {
@@ -323,7 +443,9 @@ function start() {
         });
       } else if (data === 'pos') {
         await bot.answerCallbackQuery(q.id);
-        await bot.sendMessage(q.message.chat.id, pnlText(), { reply_markup: mainKeyboard() });
+        await bot.sendMessage(q.message.chat.id, pnlText(), {
+          reply_markup: mainKeyboard(),
+        });
       } else if (data === 'bal') {
         await bot.answerCallbackQuery(q.id);
         try {
@@ -335,7 +457,9 @@ function start() {
         }
       } else if (data === 'sellall') {
         const n = positions.exitAll('manual');
-        await bot.answerCallbackQuery(q.id, { text: n ? `Selling ${n}` : 'None open' });
+        await bot.answerCallbackQuery(q.id, {
+          text: n ? `Selling ${n}` : 'None open',
+        });
       } else {
         await bot.answerCallbackQuery(q.id);
       }
