@@ -9,6 +9,7 @@ const {
 } = require('../live/liveConfig');
 const positions = require('../trading/positions');
 const scanner = require('../scanner/scanner');
+const memory = require('../learning/memory');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
 
 let bot;
@@ -24,14 +25,10 @@ function liveStatusLine() {
   const c = getConfig();
   const open = positions.listOpen();
   const sc = scanner.status();
-
-  if (c.paused) {
-    return { key: 'paused', text: '⏸  PAUSED\nBot is stopped. Press Start to resume.' };
-  }
+  if (c.paused) return { key: 'paused', text: '⏸  PAUSED\nBot is stopped. Press Start to resume.' };
   if (open.length > 0) {
     const p = open[0];
-    const pnl =
-      p.lastPnl != null ? ` · PnL ${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}%` : '';
+    const pnl = p.lastPnl != null ? ` · PnL ${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}%` : '';
     const held = Math.round((Date.now() - p.openedAt) / 1000);
     return {
       key: `trade:${open.length}:${Math.floor(held / 10)}`,
@@ -50,13 +47,7 @@ function statusText() {
   const { daily } = positions.stats();
   const sc = scanner.status();
   const riskLabel =
-    c.riskProfile === 'easy'
-      ? '🟢 Easy'
-      : c.riskProfile === 'hard'
-        ? '🔴 Hard'
-        : c.riskProfile === 'custom'
-          ? '⚙️ Custom'
-          : '🟡 Medium';
+    c.riskProfile === 'easy' ? '🟢 Easy' : c.riskProfile === 'hard' ? '🔴 Hard' : c.riskProfile === 'custom' ? '⚙️ Custom' : '🟡 Medium';
   return [
     DRY_RUN ? '🧪 DRY RUN' : '🔴 LIVE',
     c.paused ? '⏸ PAUSED' : '🟢 RUNNING',
@@ -73,42 +64,25 @@ function statusText() {
 function pnlText() {
   const open = positions.listOpen();
   const { daily, history, balanceKind } = positions.stats();
-  const lines = [];
-  lines.push(DRY_RUN ? '🧪 PAPER MODE' : '🔴 LIVE (chain-read fills)');
+  const lines = [DRY_RUN ? '🧪 PAPER MODE' : '🔴 LIVE (chain-read fills)'];
   if (open.length) {
     lines.push('', 'Open:');
     for (const p of open) {
-      const pnl =
-        p.lastPnl == null
-          ? 'no price yet'
-          : `${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}% (est.)`;
+      const pnl = p.lastPnl == null ? 'no price yet' : `${p.lastPnl >= 0 ? '+' : ''}${p.lastPnl.toFixed(1)}% (est.)`;
       const held = Math.round((Date.now() - p.openedAt) / 1000);
-      const tag =
-        p.status === 'stuck' ? ' ⚠️ SELL STUCK' : p.status === 'selling' ? ' selling…' : '';
-      lines.push(
-        `${p.mint.slice(0, 6)}…${p.mint.slice(-4)} · ${p.sizeSol.toFixed(4)} SOL · ${pnl} · ${held}s${tag}`
-      );
+      const tag = p.status === 'stuck' ? ' ⚠️ SELL STUCK' : p.status === 'selling' ? ' selling…' : '';
+      lines.push(`${p.mint.slice(0, 6)}…${p.mint.slice(-4)} · ${p.sizeSol.toFixed(4)} SOL · ${pnl} · ${held}s${tag}`);
       if (p.buySig) lines.push(`  https://solscan.io/tx/${p.buySig}`);
     }
-  } else {
-    lines.push('', 'No open positions');
-  }
-  lines.push(
-    '',
-    `Today realized: ${daily.realizedSol >= 0 ? '+' : ''}${(daily.realizedSol || 0).toFixed(4)} SOL`
-  );
+  } else lines.push('', 'No open positions');
+  lines.push('', `Today realized: ${daily.realizedSol >= 0 ? '+' : ''}${(daily.realizedSol || 0).toFixed(4)} SOL`);
   lines.push(`Trades today: ${daily.tradesToday || 0}`);
-  if (balanceKind === 'paper' && daily.paperBalanceSol != null) {
-    lines.push(`Paper balance: ${daily.paperBalanceSol.toFixed(4)} SOL`);
-  }
+  if (balanceKind === 'paper' && daily.paperBalanceSol != null) lines.push(`Paper balance: ${daily.paperBalanceSol.toFixed(4)} SOL`);
   const last = history.slice(0, 8);
   if (last.length) {
     lines.push('', 'Last trades:');
     for (const h of last) {
-      const r =
-        h.realizedSol == null
-          ? '?'
-          : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL (${(h.pct || 0).toFixed(1)}%)`;
+      const r = h.realizedSol == null ? '?' : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL (${(h.pct || 0).toFixed(1)}%)`;
       lines.push(`${h.mint.slice(0, 6)}… ${h.reason} ${r}`);
     }
   }
@@ -138,18 +112,12 @@ function reportText() {
       const held = Math.round((Date.now() - p.openedAt) / 1000);
       lines.push(`• ${p.mint.slice(0, 8)}… ${pnl} · held ${held}s · ${p.status}`);
       lines.push(`  cost ${p.sizeSol.toFixed(4)} SOL · ${p.fillSource}`);
-      if (p.buySig) lines.push(`  tx ${p.buySig.slice(0, 16)}…`);
     }
-  } else {
-    lines.push('No open positions — scanner hunting.');
-  }
+  } else lines.push('No open positions — scanner hunting.');
   if (history.length) {
     lines.push('', 'RECENT CLOSED:');
     for (const h of history.slice(0, 5)) {
-      const r =
-        h.realizedSol == null
-          ? '?'
-          : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL`;
+      const r = h.realizedSol == null ? '?' : `${h.realizedSol >= 0 ? '+' : ''}${h.realizedSol.toFixed(4)} SOL`;
       lines.push(`• ${h.mint.slice(0, 6)}… ${h.reason} ${r}`);
     }
   }
@@ -160,13 +128,11 @@ function reportText() {
 function helpText() {
   return [
     'Commands:',
-    '/menu — status + buttons',
-    '/report — live report (refresh button)',
-    '/pnl — positions + today PnL',
+    '/menu · /report · /pnl',
+    '/review · /advice (self-learning)',
     '/risk easy|medium|hard',
     '/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10',
-    '/setsize 5 · /settp 40 · /setsl 25 · /sethold 8',
-    '/setscan 15 · /setmaxtrades 12',
+    '/setsize · /settp · /setsl · /sethold · /setscan · /setmaxtrades',
     '/pause · /resume · /sellall · /balance',
   ].join('\n');
 }
@@ -187,9 +153,12 @@ function mainKeyboard() {
       ],
       [
         { text: '📈 Positions', callback_data: 'pos' },
-        { text: '💼 Balance', callback_data: 'bal' },
+        { text: '📚 Advice', callback_data: 'advice' },
       ],
-      [{ text: '🔥 Sell All', callback_data: 'sellall' }],
+      [
+        { text: '💼 Balance', callback_data: 'bal' },
+        { text: '🔥 Sell All', callback_data: 'sellall' },
+      ],
     ],
   };
 }
@@ -210,10 +179,7 @@ async function refreshLiveStatus(force = false) {
   lastStatusKey = key;
   try {
     if (statusMsgId) {
-      await bot.editMessageText(text, {
-        chat_id: TELEGRAM_CHAT_ID,
-        message_id: statusMsgId,
-      });
+      await bot.editMessageText(text, { chat_id: TELEGRAM_CHAT_ID, message_id: statusMsgId });
     } else {
       const sent = await bot.sendMessage(TELEGRAM_CHAT_ID, text);
       statusMsgId = sent.message_id;
@@ -231,18 +197,9 @@ async function refreshLiveStatus(force = false) {
 function parseCustomArgs(text) {
   const params = {};
   const map = {
-    size: 'sizeUsd',
-    sizeusd: 'sizeUsd',
-    tp: 'takeProfitPct',
-    takeprofit: 'takeProfitPct',
-    sl: 'stopLossPct',
-    stoploss: 'stopLossPct',
-    hold: 'maxHoldMin',
-    maxhold: 'maxHoldMin',
-    scan: 'scanIntervalMin',
-    interval: 'scanIntervalMin',
-    max: 'maxTradesDay',
-    maxtrades: 'maxTradesDay',
+    size: 'sizeUsd', sizeusd: 'sizeUsd', tp: 'takeProfitPct', takeprofit: 'takeProfitPct',
+    sl: 'stopLossPct', stoploss: 'stopLossPct', hold: 'maxHoldMin', maxhold: 'maxHoldMin',
+    scan: 'scanIntervalMin', interval: 'scanIntervalMin', max: 'maxTradesDay', maxtrades: 'maxTradesDay',
   };
   const re = /(\w+)=([\d.]+)/g;
   let m;
@@ -260,7 +217,6 @@ function start() {
   }
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
   console.log('[telegram] polling');
-
   setTimeout(() => refreshLiveStatus(true), 2000);
   setInterval(() => refreshLiveStatus(), 15000);
 
@@ -268,65 +224,46 @@ function start() {
     if (!allowed(msg.chat.id)) return;
     bot.sendMessage(msg.chat.id, statusText(), { reply_markup: mainKeyboard() });
   });
-
   bot.onText(/\/help/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     bot.sendMessage(msg.chat.id, helpText());
   });
-
   bot.onText(/\/report/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     bot.sendMessage(msg.chat.id, reportText(), { reply_markup: reportKeyboard() });
   });
-
   bot.onText(/\/risk(?:\s+(easy|medium|hard|high))?/i, (msg, m) => {
     if (!allowed(msg.chat.id)) return;
     let name = (m[1] || '').toLowerCase();
     if (name === 'high') name = 'hard';
     if (!name) {
-      const lines = listPresets().map(
-        (p) => `• *${p.name}* (\`/risk ${p.key}\`)\n  ${p.summary}`
-      );
-      bot.sendMessage(
-        msg.chat.id,
-        `Current: *${getConfig().riskProfile}*\n\n${lines.join('\n\n')}\n\nOr set custom: /custom size=5 tp=40 sl=25 hold=8`,
-        { parse_mode: 'Markdown', reply_markup: mainKeyboard() }
-      );
+      const lines = listPresets().map((p) => `• *${p.name}* (\`/risk ${p.key}\`)\n  ${p.summary}`);
+      bot.sendMessage(msg.chat.id, `Current: *${getConfig().riskProfile}*\n\n${lines.join('\n\n')}\n\nOr: /custom size=5 tp=40 sl=25 hold=8`, {
+        parse_mode: 'Markdown', reply_markup: mainKeyboard(),
+      });
       return;
     }
     const cfg = applyPreset(name);
-    if (!cfg) {
-      bot.sendMessage(msg.chat.id, 'Use: /risk easy | medium | hard');
-      return;
-    }
+    if (!cfg) return bot.sendMessage(msg.chat.id, 'Use: /risk easy | medium | hard');
     bot.sendMessage(msg.chat.id, `✅ Risk → *${cfg.riskProfile}*\n\n${statusText()}`, {
-      parse_mode: 'Markdown',
-      reply_markup: mainKeyboard(),
+      parse_mode: 'Markdown', reply_markup: mainKeyboard(),
     });
     refreshLiveStatus(true);
   });
-
   bot.onText(/\/custom\b(.*)/i, (msg, m) => {
     if (!allowed(msg.chat.id)) return;
     const params = parseCustomArgs(m[1] || '');
     if (!Object.keys(params).length) {
-      bot.sendMessage(
-        msg.chat.id,
-        'Usage:\n/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10\n\nOr one-by-one:\n/setsize 5\n/settp 40\n/setsl 25\n/sethold 8\n/setscan 15\n/setmaxtrades 10'
-      );
-      return;
+      return bot.sendMessage(msg.chat.id, 'Usage:\n/custom size=5 tp=40 sl=25 hold=8 scan=15 max=10');
     }
     applyCustom(params);
-    bot.sendMessage(msg.chat.id, `✅ Custom entry set\n\n${statusText()}`, {
-      reply_markup: mainKeyboard(),
-    });
+    bot.sendMessage(msg.chat.id, `✅ Custom entry set\n\n${statusText()}`, { reply_markup: mainKeyboard() });
     refreshLiveStatus(true);
   });
-
   bot.onText(/\/setsize\s+([\d.]+)/i, (msg, m) => {
     if (!allowed(msg.chat.id)) return;
     applyCustom({ sizeUsd: Number(m[1]) });
-    bot.sendMessage(msg.chat.id, `Size → $${m[1]} (custom)\n${statusText()}`);
+    bot.sendMessage(msg.chat.id, `Size → $${m[1]} (custom)`);
     refreshLiveStatus(true);
   });
   bot.onText(/\/settp\s+([\d.]+)/i, (msg, m) => {
@@ -355,7 +292,6 @@ function start() {
     applyCustom({ maxTradesDay: Number(m[1]) });
     bot.sendMessage(msg.chat.id, `Max trades/day → ${m[1]} (custom)`);
   });
-
   bot.onText(/\/(pause|stoptrading)/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     applyLocal({ paused: true });
@@ -368,18 +304,34 @@ function start() {
     bot.sendMessage(msg.chat.id, 'Running');
     refreshLiveStatus(true);
   });
-
   bot.onText(/\/pnl/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     bot.sendMessage(msg.chat.id, pnlText(), { reply_markup: mainKeyboard() });
   });
-
+  bot.onText(/\/review(?:\s+(\d+))?/i, async (msg, m) => {
+    if (!allowed(msg.chat.id)) return;
+    const days = m[1] ? Math.min(90, Number(m[1])) : 7;
+    try {
+      const { text, n } = await memory.review({ days });
+      bot.sendMessage(msg.chat.id, n ? text : text + '\n\n(No rows yet — run trade_log SQL in Supabase, close a few trades.)');
+    } catch (e) {
+      bot.sendMessage(msg.chat.id, `Review error: ${e.message}`);
+    }
+  });
+  bot.onText(/\/(advice|learn)/i, async (msg) => {
+    if (!allowed(msg.chat.id)) return;
+    try {
+      const { text, n } = await memory.advice();
+      bot.sendMessage(msg.chat.id, n ? text : 'Not enough history yet.\n1) Run trade_log SQL (supabase.sql)\n2) Close several trades\n3) /advice again');
+    } catch (e) {
+      bot.sendMessage(msg.chat.id, `Advice error: ${e.message}`);
+    }
+  });
   bot.onText(/\/sellall/i, (msg) => {
     if (!allowed(msg.chat.id)) return;
     const n = positions.exitAll('manual');
     bot.sendMessage(msg.chat.id, n ? `Selling ${n} position(s)…` : 'No open positions');
   });
-
   bot.onText(/\/bal(?:ance)?/i, async (msg) => {
     if (!allowed(msg.chat.id)) return;
     try {
@@ -399,53 +351,38 @@ function start() {
     const data = q.data || '';
     try {
       if (data === 'toggle_pause') {
-        const c = getConfig();
-        applyLocal({ paused: !c.paused });
-        await bot.answerCallbackQuery(q.id, {
-          text: getConfig().paused ? 'Paused' : 'Running',
-        });
-        await bot.editMessageText(statusText(), {
-          chat_id: q.message.chat.id,
-          message_id: q.message.message_id,
-          reply_markup: mainKeyboard(),
-        });
+        applyLocal({ paused: !getConfig().paused });
+        await bot.answerCallbackQuery(q.id, { text: getConfig().paused ? 'Paused' : 'Running' });
+        await bot.editMessageText(statusText(), { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: mainKeyboard() });
         refreshLiveStatus(true);
       } else if (data === 'risk_easy' || data === 'risk_medium' || data === 'risk_hard') {
         applyPreset(data.replace('risk_', ''));
         await bot.answerCallbackQuery(q.id, { text: `Set ${data.replace('risk_', '')}` });
-        await bot.editMessageText(statusText(), {
-          chat_id: q.message.chat.id,
-          message_id: q.message.message_id,
-          reply_markup: mainKeyboard(),
-        });
+        await bot.editMessageText(statusText(), { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: mainKeyboard() });
         refreshLiveStatus(true);
       } else if (data === 'report' || data === 'refresh_report') {
         await bot.answerCallbackQuery(q.id, { text: 'Refreshed' });
         try {
-          await bot.editMessageText(reportText(), {
-            chat_id: q.message.chat.id,
-            message_id: q.message.message_id,
-            reply_markup: reportKeyboard(),
-          });
+          await bot.editMessageText(reportText(), { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: reportKeyboard() });
         } catch (e) {
           if (!/message is not modified/i.test(e.message)) {
-            await bot.sendMessage(q.message.chat.id, reportText(), {
-              reply_markup: reportKeyboard(),
-            });
+            await bot.sendMessage(q.message.chat.id, reportText(), { reply_markup: reportKeyboard() });
           }
         }
       } else if (data === 'menu') {
         await bot.answerCallbackQuery(q.id);
-        await bot.editMessageText(statusText(), {
-          chat_id: q.message.chat.id,
-          message_id: q.message.message_id,
-          reply_markup: mainKeyboard(),
-        });
+        await bot.editMessageText(statusText(), { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: mainKeyboard() });
       } else if (data === 'pos') {
         await bot.answerCallbackQuery(q.id);
-        await bot.sendMessage(q.message.chat.id, pnlText(), {
-          reply_markup: mainKeyboard(),
-        });
+        await bot.sendMessage(q.message.chat.id, pnlText(), { reply_markup: mainKeyboard() });
+      } else if (data === 'advice') {
+        await bot.answerCallbackQuery(q.id, { text: 'Loading…' });
+        try {
+          const { text, n } = await memory.advice();
+          await bot.sendMessage(q.message.chat.id, n ? text : 'Not enough history yet. Close more trades.');
+        } catch (e) {
+          await bot.sendMessage(q.message.chat.id, `Advice error: ${e.message}`);
+        }
       } else if (data === 'bal') {
         await bot.answerCallbackQuery(q.id);
         try {
@@ -457,16 +394,12 @@ function start() {
         }
       } else if (data === 'sellall') {
         const n = positions.exitAll('manual');
-        await bot.answerCallbackQuery(q.id, {
-          text: n ? `Selling ${n}` : 'None open',
-        });
+        await bot.answerCallbackQuery(q.id, { text: n ? `Selling ${n}` : 'None open' });
       } else {
         await bot.answerCallbackQuery(q.id);
       }
     } catch (e) {
-      try {
-        await bot.answerCallbackQuery(q.id, { text: 'Error' });
-      } catch (_) {}
+      try { await bot.answerCallbackQuery(q.id, { text: 'Error' }); } catch (_) {}
     }
   });
 }
