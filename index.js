@@ -10,16 +10,17 @@ const scanner = require('./src/scanner/scanner');
 
 console.log('=== De-Government Strategy v3 — Direct Scanner ===');
 console.log(config.DRY_RUN ? 'Mode: DRY RUN (paper trading, nothing is sent)' : 'Mode: LIVE (real money)');
-const cfg = liveConfig.getConfig();
-console.log(
-  `Active: ${cfg.riskProfile} · $${cfg.sizeUsd} · TP +${cfg.takeProfitPct}% · SL −${cfg.stopLossPct}% · hold ${cfg.maxHoldMin}m · every ${cfg.scanIntervalMin}m · max ${cfg.maxTradesDay}/day`
-);
 console.log(`RPC pool: ${rpcPool.status().map((e) => e.host).join(', ')}`);
 
 async function main() {
   wallet.loadWallet();
 
-  liveConfig.start();
+  await liveConfig.start(); // load persisted custom plan before anything else
+  const cfg = liveConfig.getConfig();
+  console.log(
+    `Active plan: ${cfg.riskProfile} · $${cfg.sizeUsd} · TP +${cfg.takeProfitPct}% · SL −${cfg.stopLossPct}% · hold ${cfg.maxHoldMin}m · every ${cfg.scanIntervalMin}m · max ${cfg.maxTradesDay}/day`
+  );
+
   positions.setNotifier((text) => telegram.notify(text));
   await positions.init();
   telegram.start();
@@ -31,7 +32,6 @@ async function main() {
     logger.warn('No Supabase configured: positions are saved to local files, which Railway wipes on every deploy');
   }
 
-  // Direct scanner — active on start
   scanner.start(async (pick) => {
     const why = `scanner:${pick.score.toFixed(0)}`;
     logger.info(`signal ${pick.mint.slice(0, 8)}… score=${pick.score.toFixed(1)}`);
@@ -55,9 +55,6 @@ function announceEntry(res, mint, why) {
     );
   } else if (res.why && !/^(busy|paused|max concurrent|max trades)/.test(res.why)) {
     logger.info(`skip ${mint.slice(0, 8)}…: ${res.why}`);
-    if (/buy|sell|tx|landed|tokens|rpc|pumpportal|send/i.test(res.why)) {
-      telegram.notify(`⚠️ Entry on ${mint.slice(0, 6)}… did not happen: ${res.why.slice(0, 200)}`);
-    }
   }
 }
 
@@ -79,6 +76,6 @@ process.on('unhandledRejection', (e) => logger.error('unhandledRejection:', (e &
 process.on('uncaughtException', (e) => logger.error('uncaughtException:', (e && e.message) || e));
 
 main().catch((e) => {
-  logger.error('Fatal:', e.message);
+  logger.error('fatal:', e.message || e);
   process.exit(1);
 });
